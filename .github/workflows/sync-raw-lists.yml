@@ -1,0 +1,101 @@
+name: Sync raw IP lists
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Master repository normally updates shortly after 01:00 UTC.
+    - cron: "15 1 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-raw-ip-lists
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out raw repository
+        uses: actions/checkout@v4
+
+      - name: Download master lists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 5 \
+            -o /tmp/list-ipv4.rsc \
+            https://raw.githubusercontent.com/mohavise/Get-IP-Iran-evo/main/list-ipv4.rsc
+
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 5 \
+            -o /tmp/list-ipv6.rsc \
+            https://raw.githubusercontent.com/mohavise/Get-IP-Iran-evo/main/list-ipv6.rsc
+
+          test -s /tmp/list-ipv4.rsc
+          test -s /tmp/list-ipv6.rsc
+
+      - name: Generate separate raw CIDR lists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sed -n 's/.*address=\([^ ]*\) list=.*/\1/p' /tmp/list-ipv4.rsc \
+            | awk 'NF && !seen[$0]++' > iran-ipv4.txt
+
+          sed -n 's/.*address=\([^ ]*\) list=.*/\1/p' /tmp/list-ipv6.rsc \
+            | awk 'NF && !seen[$0]++' > iran-ipv6.txt
+
+      - name: Validate generated files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s iran-ipv4.txt
+          test -s iran-ipv6.txt
+
+          ipv4_count=$(wc -l < iran-ipv4.txt)
+          ipv6_count=$(wc -l < iran-ipv6.txt)
+
+          if (( ipv4_count < 1000 )); then
+            echo "IPv4 validation failed: only ${ipv4_count} prefixes generated"
+            exit 1
+          fi
+
+          if (( ipv6_count < 100 )); then
+            echo "IPv6 validation failed: only ${ipv6_count} prefixes generated"
+            exit 1
+          fi
+
+          if grep -Ev '^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$' iran-ipv4.txt; then
+            echo "IPv4 validation failed: invalid line detected"
+            exit 1
+          fi
+
+          if grep -Ev '^[0-9A-Fa-f:]+/[0-9]{1,3}$' iran-ipv6.txt; then
+            echo "IPv6 validation failed: invalid line detected"
+            exit 1
+          fi
+
+          echo "Validated ${ipv4_count} IPv4 prefixes and ${ipv6_count} IPv6 prefixes"
+
+      - name: Commit updated raw lists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- iran-ipv4.txt iran-ipv6.txt && \
+             git ls-files --error-unmatch iran-ipv4.txt iran-ipv6.txt >/dev/null 2>&1; then
+            echo "Raw lists are already current"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add iran-ipv4.txt iran-ipv6.txt
+          git commit -m "Sync raw IPv4 and IPv6 lists"
+          git push
